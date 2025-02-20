@@ -32,6 +32,35 @@ log_message() {
 }
 
 #####################################################################
+# Function: show_message
+# Description: Shows a message to the user and optionally sends desktop notification
+# Parameters: $1 - Message title, $2 - Message content
+#####################################################################
+show_message() {
+    local title="$1"
+    local content="$2"
+    
+    # Terminal output with formatting
+    echo -e "\n\033[1;34m=== $title ===\033[0m"
+    echo -e "$content"
+    
+    # Desktop notification if available
+    if command -v notify-send &> /dev/null; then
+        notify-send "$title" "$content"
+    fi
+}
+
+#####################################################################
+# Function: get_human_readable_date
+# Description: Converts Unix timestamp to human readable date
+# Parameters: $1 - Unix timestamp
+#####################################################################
+get_human_readable_date() {
+    local timestamp=$1
+    date -d "@$timestamp" '+%A, %B %d at %I:%M %p'
+}
+
+#####################################################################
 # Function: handle_error
 # Description: Error handler for script failures
 # Parameters: $1 - Exit code, $2 - Line number
@@ -102,7 +131,19 @@ should_run_update() {
 
 # Verify if update should proceed
 if ! should_run_update; then
-    log_message "Update not needed. Last run was less than a week ago."
+    if [ -f "$LAST_RUN_FILE" ]; then
+        last_update=$(cat "$LAST_RUN_FILE")
+        last_update_date=$(get_human_readable_date "$last_update")
+        next_update=$(($last_update + 518400))
+        next_update_date=$(get_human_readable_date "$next_update")
+        
+        message="System update not needed yet.\n\nLast update was on: $last_update_date\nNext update scheduled for: $next_update_date"
+        show_message "Update Status" "$message"
+        
+        # Pause for user to read the message
+        echo -e "\nPress Enter to close..."
+        read -r
+    fi
     exit 0
 fi
 
