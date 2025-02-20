@@ -2,12 +2,13 @@
 
 #####################################################################
 # Script Name: weekly_update.sh
-# Description: Automated system update script that runs weekly
+# Description: Automated system update script that runs weekly.
 # This script performs a comprehensive system update including:
 #   - APT package updates and upgrades
 #   - Flatpak package updates
 #   - System cleanup
-# The script maintains a log file and ensures it only runs once per week
+# The script maintains a log file and ensures it only runs once per week.
+# It also shows a message to the user and optionally sends desktop notifications.
 #####################################################################
 
 # Configuration
