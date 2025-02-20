@@ -15,6 +15,64 @@
 # LAST_RUN_FILE: Tracks the timestamp of the last successful update
 LOG_FILE="$HOME/update_log.txt"
 LAST_RUN_FILE="$HOME/.last_update_run"
+REQUIRED_SPACE=1000000  # Required free space in KB (1GB)
+
+# Error handling
+set -e  # Exit on error
+trap 'handle_error $? $LINENO' ERR
+
+#####################################################################
+# Function: log_message
+# Description: Logs a message with timestamp to both console and log file
+# Parameters: $1 - Message to log
+#####################################################################
+log_message() {
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $1" | tee -a "$LOG_FILE"
+}
+
+#####################################################################
+# Function: handle_error
+# Description: Error handler for script failures
+# Parameters: $1 - Exit code, $2 - Line number
+#####################################################################
+handle_error() {
+    local exit_code=$1
+    local line_number=$2
+    log_message "Error: Command failed on line $line_number with exit code $exit_code"
+    # Send desktop notification if available
+    if command -v notify-send &> /dev/null; then
+        notify-send "System Update Error" "Update failed. Check $LOG_FILE for details."
+    fi
+    exit $exit_code
+}
+
+#####################################################################
+# Function: check_network
+# Description: Verifies internet connectivity
+# Returns: 0 if connected, 1 if not
+#####################################################################
+check_network() {
+    if ! ping -c 1 8.8.8.8 &> /dev/null; then
+        log_message "Error: No internet connection available"
+        return 1
+    fi
+    return 0
+}
+
+#####################################################################
+# Function: check_disk_space
+# Description: Verifies sufficient disk space is available
+# Returns: 0 if enough space, 1 if not
+#####################################################################
+check_disk_space() {
+    local available_space=$(df /var/cache/apt/archives | awk 'NR==2 {print $4}')
+    if [ "$available_space" -lt "$REQUIRED_SPACE" ]; then
+        log_message "Error: Insufficient disk space. Required: ${REQUIRED_SPACE}KB, Available: ${available_space}KB"
+        return 1
+    fi
+    return 0
+}
 
 #####################################################################
 # Function: should_run_update
@@ -44,38 +102,55 @@ should_run_update() {
 
 # Verify if update should proceed
 if ! should_run_update; then
-    echo "Update not needed. Last run was less than a week ago."
+    log_message "Update not needed. Last run was less than a week ago."
     exit 0
 fi
 
 # Configure output logging
-# Redirect both stdout and stderr to terminal and log file using tee
 exec > >(tee -a "$LOG_FILE") 2>&1
-echo "Update started at $(date)"
+log_message "Update started"
+
+# Perform pre-update checks
+log_message "Performing pre-update checks..."
+check_network || exit 1
+check_disk_space || exit 1
 
 # System Update Process:
 
 # Step 1: Update package index
-sudo apt update
+log_message "Updating package index..."
+sudo apt update || handle_error $? $LINENO
 
 # Step 2: Perform safe upgrade of installed packages
-sudo apt upgrade -y
+log_message "Performing safe upgrade..."
+sudo apt upgrade -y || handle_error $? $LINENO
 
 # Step 3: Perform full upgrade (may handle changed dependencies)
-sudo apt full-upgrade -y
+log_message "Performing full upgrade..."
+sudo apt full-upgrade -y || handle_error $? $LINENO
 
 # Step 4: Update Flatpak applications and runtimes
-flatpak update -y
+if command -v flatpak &> /dev/null; then
+    log_message "Updating Flatpak applications..."
+    flatpak update -y || handle_error $? $LINENO
+fi
 
 # System Cleanup Process:
 
 # Step 1: Remove orphaned packages and dependencies
-sudo apt autoremove -y
+log_message "Removing orphaned packages..."
+sudo apt autoremove -y || handle_error $? $LINENO
 
 # Step 2: Clear local repository of retrieved package files
-sudo apt clean
+log_message "Cleaning package cache..."
+sudo apt clean || handle_error $? $LINENO
 
-echo "System update completed successfully at $(date)!"
+log_message "System update completed successfully!"
+
+# Send completion notification if available
+if command -v notify-send &> /dev/null; then
+    notify-send "System Update Complete" "Your system has been successfully updated."
+fi
 
 # Record successful completion time for next run calculation
 date +%s > "$LAST_RUN_FILE"
