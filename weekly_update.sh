@@ -22,6 +22,7 @@ LOG_FILE="$HOME/update_log.txt"
 LAST_RUN_FILE="$HOME/.last_update_run"
 LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/weekly_update.lock"
 REQUIRED_SPACE=1000000          # Required free space in KB (1GB)
+REQUIRED_BOOT_SPACE=150000      # Required free space on a separate /boot in KB (~150MB, one kernel + initrd)
 UPDATE_INTERVAL_DAYS=6          # Run when MORE than this many days have passed
 UPDATE_INTERVAL=$((UPDATE_INTERVAL_DAYS * 86400))
 MAX_LOG_SIZE=5242880            # Rotate log when larger than this (5MB)
@@ -48,6 +49,7 @@ trap 'cleanup' EXIT
 
 FORCE=0
 SUDO_KEEPALIVE_PID=""
+CURRENT_STEP="Startup"
 
 #####################################################################
 # Function: usage
@@ -69,6 +71,17 @@ log_message() {
     local timestamp
     timestamp=$(date '+%Y-%m-%d %H:%M:%S')
     echo "[$timestamp] $1"
+}
+
+#####################################################################
+# Function: step
+# Description: Records the name of the step now running (used in error
+# messages) and logs it
+# Parameters: $1 - Step name
+#####################################################################
+step() {
+    CURRENT_STEP="$1"
+    log_message "$1..."
 }
 
 #####################################################################
@@ -137,11 +150,12 @@ fail() {
 
 #####################################################################
 # Function: handle_error
-# Description: ERR trap handler for unexpected command failures
+# Description: ERR trap handler for unexpected command failures.
+# Reports the step that was running so the message says what failed.
 # Parameters: $1 - Exit code, $2 - Line number
 #####################################################################
 handle_error() {
-    fail "Command failed on line $2 with exit code $1." "$1"
+    fail "Step '$CURRENT_STEP' failed (exit code $1, line $2)." "$1"
 }
 
 #####################################################################
@@ -176,19 +190,59 @@ check_network() {
 }
 
 #####################################################################
-# Function: check_disk_space
-# Description: Verifies sufficient disk space is available
+# Function: check_free_space
+# Description: Verifies a filesystem has enough free space
+# Parameters: $1 - Path on the filesystem, $2 - Required free space in KB
 # Returns: 0 if enough space, 1 if not
 #####################################################################
-check_disk_space() {
-    local available_space
+check_free_space() {
+    local path="$1"
+    local required="$2"
+    local available
     # -P forces one line per filesystem so NR==2 is always the data row
-    available_space=$(df -Pk /var/cache/apt/archives | awk 'NR==2 {print $4}')
-    if [ "$available_space" -lt "$REQUIRED_SPACE" ]; then
-        log_message "Error: Insufficient disk space. Required: ${REQUIRED_SPACE}KB, Available: ${available_space}KB"
+    available=$(df -Pk "$path" | awk 'NR==2 {print $4}')
+    if [ "$available" -lt "$required" ]; then
+        log_message "Insufficient space on $path. Required: ${required}KB, Available: ${available}KB"
         return 1
     fi
     return 0
+}
+
+#####################################################################
+# Function: check_boot_space
+# Description: Kernel upgrades write a new kernel and initrd to /boot.
+# When /boot is its own (usually small) partition, check it separately.
+# Returns: 0 if enough space or /boot is not separate, 1 if not
+#####################################################################
+check_boot_space() {
+    if mountpoint -q /boot; then
+        check_free_space /boot "$REQUIRED_BOOT_SPACE"
+    fi
+}
+
+#####################################################################
+# Function: repair_dpkg
+# Description: If a previous run was interrupted (terminal closed, power
+# loss), dpkg is left with half-configured packages and apt refuses to
+# run. 'dpkg --audit' lists such packages; if any exist, finish
+# configuring them.
+#####################################################################
+repair_dpkg() {
+    if [ -n "$(dpkg --audit 2> /dev/null)" ]; then
+        log_message "Found interrupted package operations, running dpkg --configure -a"
+        sudo env DEBIAN_FRONTEND=noninteractive dpkg \
+            --force-confdef --force-confold --configure -a
+    fi
+}
+
+#####################################################################
+# Function: get_held_back
+# Description: Lists packages that still have an upgrade available after
+# full-upgrade (packages on hold, or Ubuntu phased updates not yet
+# offered to this machine). Prints space separated names, or nothing.
+#####################################################################
+get_held_back() {
+    apt list --upgradable 2> /dev/null | awk -F/ '/\// {print $1}' | paste -sd ' ' - || true
 }
 
 #####################################################################
@@ -292,42 +346,55 @@ exec > >(tee -a "$LOG_FILE" 9>&-) 2>&1
 log_message "Update started"
 
 # Perform pre-update checks
-log_message "Performing pre-update checks..."
+step "Performing pre-update checks"
 check_network || fail "No internet connection available."
-check_disk_space || fail "Insufficient disk space."
+check_free_space /var/cache/apt/archives "$REQUIRED_SPACE" \
+    || fail "Insufficient disk space for downloading packages."
+check_boot_space \
+    || fail "Not enough free space on /boot for a kernel update. Run 'sudo apt-get autoremove' to remove old kernels."
 start_sudo
 
 # System Update Process:
 
-# Step 1: Update package index
-log_message "Updating package index..."
+# Step 1: Finish any package operations left half done by an interrupted run
+step "Checking for interrupted package operations"
+repair_dpkg
+
+# Step 2: Update package index
+step "Updating package index"
 apt_run update
 
-# Step 2: Upgrade installed packages, including ones whose dependencies changed
+# Step 3: Upgrade installed packages, including ones whose dependencies changed
 # (full-upgrade does everything 'upgrade' does, so a separate 'upgrade' is not needed)
-log_message "Performing full upgrade..."
+step "Performing full upgrade"
 apt_run full-upgrade
 
-# Step 3: Update Flatpak applications and runtimes
+# Step 4: Note any packages that were not upgraded (held or phased)
+held_back=$(get_held_back)
+if [ -n "$held_back" ]; then
+    log_message "Not upgraded (held or phased rollout): $held_back"
+fi
+
+# Step 5: Update Flatpak applications and runtimes
 if command -v flatpak &> /dev/null; then
-    log_message "Updating Flatpak applications..."
+    step "Updating Flatpak applications"
     flatpak update -y --noninteractive
 fi
 
 # System Cleanup Process:
 
 # Step 1: Remove orphaned packages and dependencies
-log_message "Removing orphaned packages..."
+step "Removing orphaned packages"
 apt_run autoremove
 
 # Step 2: Remove Flatpak runtimes no longer used by any application
 if command -v flatpak &> /dev/null; then
-    log_message "Removing unused Flatpak runtimes..."
+    step "Removing unused Flatpak runtimes"
     flatpak uninstall --unused -y --noninteractive
 fi
 
 # Step 3: Clear local repository of retrieved package files
-log_message "Cleaning package cache..."
+step "Cleaning package cache"
 apt_run clean
 
 # Record successful completion time for next run calculation.
@@ -337,8 +404,15 @@ date +%s > "$LAST_RUN_FILE"
 log_message "System update completed successfully!"
 
 completion_message="Your system has been successfully updated."
+if [ -n "$held_back" ]; then
+    completion_message="$completion_message
+
+Not upgraded (held or phased rollout): $held_back"
+fi
 if [ -f /run/reboot-required ]; then
-    completion_message="$completion_message A reboot is required to finish applying updates."
+    completion_message="$completion_message
+
+A reboot is required to finish applying updates."
     log_message "Reboot required."
 fi
 
