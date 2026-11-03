@@ -8,15 +8,18 @@ A robust and user-friendly Bash script for automating system updates on Linux sy
 - 🔍 **Pre-update Safety Checks**:
   - Network connectivity verification
   - Disk space validation
+  - Single-instance lock (a second copy exits instead of fighting over apt)
 - 📦 **Comprehensive Updates**:
-  - APT package updates and upgrades
-  - Full system upgrade (handles dependency changes)
-  - Flatpak application updates (if installed)
+  - APT package index refresh and full upgrade (handles dependency changes)
+  - Non-interactive apt runs that keep existing config files and wait for the apt lock
+  - Flatpak application updates and unused runtime cleanup (if installed)
   - System cleanup and cache management
+  - Reboot-required notice after updates
 - 📝 **Detailed Logging**:
   - Timestamps for all operations
   - Comprehensive error logging
   - Operation history tracking
+  - Automatic log rotation at 5MB
 - 🔔 **User Notifications**:
   - Desktop notifications (if `notify-send` is available)
   - Clear terminal output with status messages
@@ -37,8 +40,8 @@ A robust and user-friendly Bash script for automating system updates on Linux sy
 
 1. Clone this repository:
    ```bash
-   git clone https://github.com/yourusername/linux-weekly-update.git
-   cd linux-weekly-update
+   git clone https://github.com/ktechll/linux_update_script.git
+   cd linux_update_script
    ```
 
 2. Make the script executable:
@@ -70,24 +73,33 @@ Simply execute the script:
 ./weekly_update.sh
 ```
 
+Force an update regardless of when it last ran:
+```bash
+./weekly_update.sh --force
+```
+
 The script will:
-1. Check if an update is needed (based on last run time)
-2. Perform safety checks (network, disk space)
-3. Run system updates
-4. Clean up unnecessary packages
-5. Notify you of completion
+1. Check that no other copy is running
+2. Check if an update is needed (based on last run time)
+3. Perform safety checks (network, disk space)
+4. Ask for the sudo password once and keep it active for the whole run
+5. Run system updates
+6. Clean up unnecessary packages and unused Flatpak runtimes
+7. Record the run time and notify you of completion (including whether a reboot is needed)
+
+When run from a terminal, the script waits for Enter before closing so the result can be read. When run without a terminal (cron, systemd), it does not wait.
 
 ### Update Schedule
 
-- Updates run once every 7 days
+- Updates run when more than 6 days have passed since the last successful run, so running it on the same weekday each week always qualifies even if started earlier in the day
 - If run earlier, the script will show:
   - Last update date
   - Next scheduled update date
-  - Option to force update (coming soon)
+  - A reminder that `--force` runs it anyway
 
 ### Log Files
 
-- Update logs: `~/update_log.txt`
+- Update logs: `~/update_log.txt` (previous log kept as `~/update_log.txt.1` after rotation)
 - Last run timestamp: `~/.last_update_run`
 
 ## Configuration
@@ -95,9 +107,12 @@ The script will:
 The script uses several configurable variables at the top of the file:
 
 ```bash
-LOG_FILE="$HOME/update_log.txt"          # Log file location
-LAST_RUN_FILE="$HOME/.last_update_run"   # Update tracking file
-REQUIRED_SPACE=1000000                   # Required free space (1GB in KB)
+LOG_FILE="$HOME/update_log.txt"                        # Log file location
+LAST_RUN_FILE="$HOME/.last_update_run"                 # Update tracking file
+LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/weekly_update.lock" # Single-instance lock
+REQUIRED_SPACE=1000000                                 # Required free space (1GB in KB)
+UPDATE_INTERVAL_DAYS=6                                 # Run when more than this many days have passed
+MAX_LOG_SIZE=5242880                                   # Rotate log above this size (5MB)
 ```
 
 ## Error Handling
@@ -125,8 +140,8 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Future Enhancements
 
-- [ ] Add force update option
-- [ ] Configurable update schedule
+- [x] Add force update option
+- [x] Configurable update schedule
 - [ ] Backup creation before updates
 - [ ] Custom update configurations
 - [ ] Additional package manager support 
